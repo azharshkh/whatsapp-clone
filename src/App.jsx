@@ -1,47 +1,123 @@
 import { useEffect, useState } from "react";
 import { supabase } from "./supabase/client";
+import {
+  BrowserRouter as Router,
+  Routes,
+  Route,
+  useNavigate,
+  Navigate,
+} from "react-router-dom";
 import Login from "./pages/Login";
 import ChatList from "./components/ChatList";
+import SetupPage from "./pages/SetupPage";
+
+function AppWrapper() {
+  return (
+    <Router>
+      <App />
+    </Router>
+  );
+}
 
 function App() {
   const [session, setSession] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [hasProfile, setHasProfile] = useState(null);
+  const navigate = useNavigate();
 
-  // Fetch session once on load and listen for changes
   useEffect(() => {
-    const fetchSession = async () => {
-      try {
-        const { data, error } = await supabase.auth.getSession();
-        if (error) throw error;
-        setSession(data.session);
-      } catch (err) {
-        console.error("Error fetching session:", err.message);
+    const init = async () => {
+      const { data, error } = await supabase.auth.getSession();
+      if (error) {
+        console.error("Error getting session:", error.message);
+        setLoading(false);
+        return;
+      }
+
+      const currentSession = data.session;
+      setSession(currentSession);
+
+      if (currentSession) {
+        await checkOrCreateProfile(
+          currentSession.user.id,
+          currentSession.user.email
+        );
+      } else {
+        setLoading(false);
       }
     };
 
-    fetchSession();
-
-    const { data: authListener } = supabase.auth.onAuthStateChange(
+    const { data: listener } = supabase.auth.onAuthStateChange(
       (_event, session) => {
         setSession(session);
+        if (session) {
+          checkOrCreateProfile(session.user.id, session.user.email);
+        } else {
+          setHasProfile(null);
+          navigate("/");
+        }
       }
     );
 
+    init();
+
     return () => {
-      authListener.subscription.unsubscribe();
+      listener?.subscription?.unsubscribe?.();
     };
   }, []);
 
-  const handleLogout = async () => {
+  const checkOrCreateProfile = async (userId, email) => {
     try {
-      await supabase.auth.signOut();
-      setSession(null);
+      const { data: profile, error } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", userId)
+        .single();
+
+      if (error && error.code !== "PGRST116") throw error;
+
+      if (!profile) {
+        const randomUsername =
+          email.split("@")[0] + Math.floor(Math.random() * 1000);
+        const { error: insertError } = await supabase.from("profiles").insert([
+          {
+            id: userId,
+            username: randomUsername,
+            avatar_url: "",
+          },
+        ]);
+
+        if (insertError) {
+          console.error("Profile creation error:", insertError.message);
+        }
+
+        setHasProfile(false);
+        navigate("/setup");
+      } else if (!profile.username || !profile.avatar_url) {
+        setHasProfile(false);
+        navigate("/setup");
+      } else {
+        setHasProfile(true);
+      }
     } catch (err) {
-      console.error("Logout failed:", err.message);
+      console.error("Error checking profile:", err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
-  return session ? (
-    <div>
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setSession(null);
+    setHasProfile(null);
+    navigate("/");
+  };
+
+  if (loading) return <p>Loading...</p>;
+  if (!session) return <Login />;
+
+  return (
+    <>
       <header style={styles.header}>
         <span>
           Logged in as: <strong>{session.user.email}</strong>
@@ -50,10 +126,31 @@ function App() {
           Logout
         </button>
       </header>
-      <ChatList session={session} />
-    </div>
-  ) : (
-    <Login />
+
+      <Routes>
+        <Route
+          path="/"
+          element={
+            hasProfile === false ? (
+              <Navigate to="/setup" />
+            ) : (
+              <ChatList session={session} />
+            )
+          }
+        />
+        <Route
+          path="/setup"
+          element={
+            hasProfile === true ? (
+              <Navigate to="/" />
+            ) : (
+              <SetupPage user={session.user} />
+            )
+          }
+        />
+        <Route path="*" element={<Navigate to="/" />} />
+      </Routes>
+    </>
   );
 }
 
@@ -78,4 +175,4 @@ const styles = {
   },
 };
 
-export default App;
+export default AppWrapper;
